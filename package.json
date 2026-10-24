@@ -1,0 +1,18 @@
+{
+  "name": "otools-toonflow",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Toonflow as an OTools plugin: bundled Bun sidecar + launcher page",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5391",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 5392",
+    "typecheck": "tsc --noEmit",
+    "runtime": "node scripts/prepare-runtime.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.1"
+  }
+}

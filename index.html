@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Toonflow</title>
+    <link rel="stylesheet" href="./src/launcher.css" />
+  </head>
+  <body>
+    <main class="launcher">
+      <header class="head">
+        <div class="mark">🎬</div>
+        <div class="titles">
+          <h1>Toonflow</h1>
+          <p class="sub">短剧 / 漫剧创作工作台</p>
+        </div>
+        <span id="status" class="pill" data-state="starting">启动中</span>
+      </header>
+
+      <p id="message" class="message">正在拉起本地服务…</p>
+
+      <div class="actions">
+        <button id="retry" type="button" hidden>重试</button>
+        <button id="stop" type="button" hidden>停止服务</button>
+        <button id="open" type="button" hidden>手动打开</button>
+      </div>
+
+      <pre id="log" class="log" hidden></pre>
+
+      <footer class="foot">
+        <span>数据目录：<code id="data-dir">—</code></span>
+      </footer>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

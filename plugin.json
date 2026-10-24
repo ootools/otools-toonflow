@@ -1,0 +1,33 @@
+{
+  "packid": "otools-toonflow",
+  "uuid": "otools-toonflow",
+  "displayName": "Toonflow",
+  "displayNameCN": "Toonflow 短剧工坊",
+  "developerName": "OTools",
+  "summary": "AI 短剧 / 漫剧创作：无限画布、剧本与分镜、角色场景资产、图像与视频生成。内置服务端，离线可用。",
+  "icon": "🎬",
+  "key": [
+    "toonflow",
+    "short-drama",
+    "storyboard",
+    "canvas",
+    "video",
+    "image",
+    "agent",
+    "mcp",
+    "短剧",
+    "漫剧",
+    "分镜",
+    "剧本"
+  ],
+  "entry": "dist/index.html",
+  "devUrl": "http://127.0.0.1:5391",
+  "quickDev": true,
+  "native": {
+    "enabled": true,
+    "libDir": "lib"
+  },
+  "openInBrowser": false,
+  "version": "0.1.0",
+  "screenshots": []
+}
