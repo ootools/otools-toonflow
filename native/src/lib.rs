@@ -121,6 +121,10 @@ pub extern "C" fn otools_plugin_free(ptr: *mut u8, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 生命周期用例会改 `OTOOLS_TOONFLOW_ROOT` / `HOME`，与端口探测用例互斥。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ping_returns_pong() {
@@ -140,8 +144,85 @@ mod tests {
 
     #[test]
     fn port_probe_reports_zero_when_stopped() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let response =
             invoke_impl(br#"{"method":"plugin_http_port","payload":null}"#).expect("port");
         assert_eq!(response["port"], 0);
+    }
+
+    /// 端到端：用桩服务替掉 Toonflow，验证「起进程 → 分配端口 → 健康检查 → 停止」。
+    ///
+    /// 需要本机有 bun；没有就跳过（CI 若不带 bun 不该因此变红）。
+    #[test]
+    fn sidecar_lifecycle_with_stub_server() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+
+        let Some(bun) = find_bun() else {
+            eprintln!("[skip] 本机没有 bun，跳过边车生命周期用例");
+            return;
+        };
+
+        let root =
+            std::env::temp_dir().join(format!("otools-toonflow-stub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtime")).expect("runtime dir");
+        std::fs::create_dir_all(root.join("build/server")).expect("build dir");
+        std::fs::write(
+            root.join("runtime/launch.mjs"),
+            include_str!("../../runtime/launch.mjs"),
+        )
+        .expect("launch.mjs");
+        std::fs::write(
+            root.join("build/server/index.js"),
+            concat!(
+                "const port = Number(process.env.TOONFLOW_SERVER_PORT);\n",
+                "Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => new Response(\"ok\") });\n",
+                "console.log(`stub listening on ${port}`);\n",
+            ),
+        )
+        .expect("stub server");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&bun, root.join("runtime/bun")).expect("symlink bun");
+        #[cfg(not(unix))]
+        std::fs::copy(&bun, root.join("runtime/bun.exe")).expect("copy bun");
+
+        std::env::set_var("OTOOLS_TOONFLOW_ROOT", &root);
+        std::env::set_var("HOME", root.join("home"));
+
+        sidecar::start().expect("start");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut port = 0;
+        while std::time::Instant::now() < deadline {
+            port = sidecar::current_port();
+            if port > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        let status = sidecar::status_json();
+        assert!(port > 0, "边车未就绪: {status}");
+        assert_eq!(status["state"], "running");
+
+        sidecar::stop().expect("stop");
+        assert_eq!(sidecar::current_port(), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn find_bun() -> Option<std::path::PathBuf> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(bin) = std::env::var_os("BUN_BIN") {
+            candidates.push(std::path::PathBuf::from(bin));
+        }
+        if let Some(home) = home {
+            candidates.push(home.join(".bun/bin/bun"));
+        }
+        candidates.push(std::path::PathBuf::from("/opt/homebrew/bin/bun"));
+        candidates.push(std::path::PathBuf::from("/usr/local/bin/bun"));
+        candidates.into_iter().find(|path| path.is_file())
     }
 }
