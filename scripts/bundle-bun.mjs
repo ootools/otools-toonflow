@@ -16,7 +16,7 @@
  *   node scripts/bundle-bun.mjs --version 1.3.14
  *   node scripts/bundle-bun.mjs --only darwin-aarch64   # 只要某个平台（本地调试）
  */
-import { mkdir, rm, chmod, readFile, stat, access } from 'node:fs/promises';
+import { mkdir, rm, chmod, readFile, stat, access, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -79,6 +79,34 @@ function unzipTo(zipPath, outDir) {
   execFileSync('unzip', ['-o', '-q', zipPath, '-d', outDir], { stdio: 'inherit' });
 }
 
+/**
+ * 递归找名为 name 的文件，返回路径最浅的那个（zip 根优先于子目录）。
+ * Bun 发布 zip 的内部布局随版本变（有时 bun 在根，有时在 bun-<triple>/ 里），
+ * 不写死路径，靠搜索适配。
+ */
+async function findExecutable(dir, name) {
+  let best = null;
+  let bestDepth = Number.POSITIVE_INFINITY;
+  async function walk(current, depth) {
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) await walk(full, depth + 1);
+      else if (entry.isFile() && entry.name === name && depth < bestDepth) {
+        best = full;
+        bestDepth = depth;
+      }
+    }
+  }
+  await walk(dir, 0);
+  return best;
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const version = options.version || (await defaultVersion());
@@ -99,9 +127,10 @@ async function main() {
     download(url, zipPath);
     unzipTo(zipPath, workDir);
 
-    // zip 里是单个 `bun`（Windows 为 `bun.exe`）。找到它，按目标名落位。
-    const inner = join(workDir, target.triple.startsWith('windows') ? 'bun.exe' : 'bun');
-    if (!(await exists(inner))) throw new Error(`解压后找不到 bun 可执行文件：${inner}`);
+    // zip 里是单个 bun（Windows 为 bun.exe），但可能在子目录里；递归找最浅的那个。
+    const want = target.triple.startsWith('windows') ? 'bun.exe' : 'bun';
+    const inner = await findExecutable(workDir, want);
+    if (!inner) throw new Error(`解压后找不到 bun 可执行文件（${want}）：${workDir}`);
     await rm(finalPath, { force: true });
     const { copyFile } = await import('node:fs/promises');
     await copyFile(inner, finalPath);
