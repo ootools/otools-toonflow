@@ -104,7 +104,8 @@ function zip(entries) {
     chunks.push(local, nameBuf, payload);
     const dir = Buffer.alloc(46);
     dir.writeUInt32LE(0x02014b50, 0);
-    dir.writeUInt16LE(20, 4);
+    // 版本来源声明为 Unix（高字节 3），解压器才会把「外部属性」当成 Unix mode 解析。
+    dir.writeUInt16LE(0x0314, 4);
     dir.writeUInt16LE(20, 6);
     dir.writeUInt16LE(0x0800, 8);
     dir.writeUInt16LE(method, 10);
@@ -116,6 +117,10 @@ function zip(entries) {
     dir.writeUInt16LE(nameBuf.length, 28);
     dir.writeUInt32LE(0, 42);
     dir.writeUInt32LE(offset, 42);
+    // 外部属性统一写 Unix mode：Bun 运行时 100755（可执行），其余 100644。
+    // 因为上面的版本来源声明为 Unix，若这里留 0 会被解压器当成 mode 0000（不可读）。
+    const mode = entry.name.startsWith('runtime/bun') ? 0o100755 : 0o100644;
+    dir.writeUInt32LE((mode << 16) >>> 0, 38);
     central.push(dir, nameBuf);
     offset += local.length + nameBuf.length + payload.length;
   }

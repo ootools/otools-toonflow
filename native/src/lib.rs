@@ -182,10 +182,25 @@ mod tests {
         )
         .expect("stub server");
 
+        // 故意做成**不可执行**的副本：复现真实 bug——.oplg 解包后 bun 只剩 644，
+        // spawn 前必须 chmod 兜底。Windows 没有 +x 概念，直接复制即可。
+        let target = if cfg!(unix) {
+            root.join("runtime/bun")
+        } else {
+            root.join("runtime/bun.exe")
+        };
+        std::fs::copy(&bun, &target).expect("copy bun");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&bun, root.join("runtime/bun")).expect("symlink bun");
-        #[cfg(not(unix))]
-        std::fs::copy(&bun, root.join("runtime/bun.exe")).expect("copy bun");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod 644");
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o111,
+                0,
+                "测试前置：副本不应可执行"
+            );
+        }
 
         std::env::set_var("OTOOLS_TOONFLOW_ROOT", &root);
         std::env::set_var("HOME", root.join("home"));

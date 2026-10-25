@@ -182,6 +182,16 @@ pub fn start() -> Result<(), String> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // .oplg 是手写 ZIP，宿主解包后可能丢掉可执行位（解压器不一定还原 Unix mode）。
+    // spawn 前兜底 chmod +x，否则 execve 直接 EACCES、边车永远起不来（真实踩过）。
+    #[cfg(unix)]
+    if let Err(error) = ensure_executable(&bun) {
+        return Err(format!(
+            "无法为 Bun 运行时可执行权限（{}）: {error}",
+            bun.display()
+        ));
+    }
+
     let child = command.spawn().map_err(|error| {
         format!(
             "启动边车失败({}): {error}；日志见 {}",
@@ -299,6 +309,21 @@ fn is_healthy(port: u16) -> bool {
         }
         _ => false,
     }
+}
+
+/// 确保可执行位存在：`.oplg` 解包后 bun 可能只有 644，spawn 会 EACCES。
+/// 只在缺少执行位时才 chmod，避免每次启动都写权限。
+#[cfg(unix)]
+fn ensure_executable(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::metadata(path)?;
+    let mode = meta.permissions().mode();
+    if mode & 0o111 == 0 {
+        let mut perms = meta.permissions();
+        perms.set_mode(mode | 0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }
 
 fn free_port() -> Result<u16, String> {
