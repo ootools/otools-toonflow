@@ -29,13 +29,16 @@ const RELEASE_BASE = 'https://github.com/oven-sh/bun/releases/download';
 
 // Bun triple → 包内文件名（与 native platform_bun_name 对齐；windows 带 .exe）。
 // 默认打四个主力平台（macOS 双架构 / Linux x64 / Windows x64）。arm64 Linux
-// 目前不在默认集里（Bun 二进制 ~63MB/个，先控体积）；需要时加一行即可，
+// 目前不在默认集里（Bun 二进制 ~60MB/个，先控体积）；需要时加一行即可，
 // native 层的 platform_bun_name() 已认识 bun-linux-aarch64。
+//
+// 注意 asset 用 Bun 发布资产名（用 x64 不是 x86_64）：bun-<triple>.zip，
+// 而 name 用 native 认的文件名（x86_64）。二者故意不同。
 const TARGETS = [
   { triple: 'darwin-aarch64', asset: 'bun-darwin-aarch64.zip', name: 'bun-darwin-aarch64' },
-  { triple: 'darwin-x86_64', asset: 'bun-darwin-x86_64.zip', name: 'bun-darwin-x86_64' },
-  { triple: 'linux-x86_64', asset: 'bun-linux-x86_64.zip', name: 'bun-linux-x86_64' },
-  { triple: 'windows-x86_64', asset: 'bun-windows-x86_64.zip', name: 'bun-windows-x86_64.exe' },
+  { triple: 'darwin-x86_64', asset: 'bun-darwin-x64.zip', name: 'bun-darwin-x86_64' },
+  { triple: 'linux-x86_64', asset: 'bun-linux-x64.zip', name: 'bun-linux-x86_64' },
+  { triple: 'windows-x86_64', asset: 'bun-windows-x64.zip', name: 'bun-windows-x86_64.exe' },
 ];
 
 function parseArgs(argv) {
