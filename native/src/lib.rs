@@ -176,7 +176,7 @@ mod tests {
             root.join("build/server/index.js"),
             concat!(
                 "const port = Number(process.env.TOONFLOW_SERVER_PORT);\n",
-                "Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => new Response(\"ok\") });\n",
+                "Bun.serve({ hostname: \"127.0.0.1\", port, fetch: () => new Response(\"toonflow-stub-ok\") });\n",
                 "console.log(`stub listening on ${port}`);\n",
             ),
         )
@@ -206,10 +206,27 @@ mod tests {
         assert!(port > 0, "边车未就绪: {status}");
         assert_eq!(status["state"], "running");
 
+        // 真发一次 HTTP：不只是健康检查通过，边车得真的把响应体吐出来。
+        let body = http_get(port).expect("边车 HTTP GET");
+        assert!(body.contains("toonflow-stub-ok"), "边车响应异常: {body}");
+
         sidecar::stop().expect("stop");
         assert_eq!(sidecar::current_port(), 0);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 阻塞式 HTTP GET，取回响应体（只用于测试里的边车冒烟）。
+    fn http_get(port: u16) -> Option<String> {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok()?;
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .ok()?;
+        let mut buffer = String::new();
+        stream.read_to_string(&mut buffer).ok()?;
+        Some(buffer)
     }
 
     fn find_bun() -> Option<std::path::PathBuf> {

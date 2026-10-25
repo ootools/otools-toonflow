@@ -1,0 +1,322 @@
+name: release-plugin
+run-name: "插件${{ inputs.dry_run && '验证' || '发布' }} · ${{ inputs.display_version || github.ref_name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      display_version:
+        description: "打包版本号（留空取 plugin.json）"
+        default: ""
+      auth_mode:
+        description: "市场认证方式"
+        type: choice
+        options: [pat, oidc, login, shared]
+        default: pat
+      publish_market:
+        description: "同步插件市场（dry-run 时仅检查配置，不上架）"
+        type: boolean
+        default: false
+      dry_run:
+        description: "仅构建和校验，不创建 Release、不提交市场"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 四个平台各构建一份 native 适配层（拉起/看护 Bun 边车的那层）。
+  # 宿主按平台名挑 lib/<name>，文件名是**宿主约定**、与 crate 名无关
+  # （宿主 native_plugins/core.rs 的 platform_lib_name()）：
+  #   macOS.dylib / Windows.dll / Linux.so
+  # macOS 双架构各出一份带架构后缀的中间产物，交给 merge-native 合成 universal。
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            artifact: linux
+            built: target/release/libotools_toonflow_native.so
+            output_name: Linux.so
+          - os: windows-latest
+            platform: windows
+            artifact: windows
+            built: target/release/otools_toonflow_native.dll
+            output_name: Windows.dll
+          - os: macos-latest
+            platform: macos
+            artifact: macos-arm64
+            built: target/release/libotools_toonflow_native.dylib
+            output_name: macOS-arm64.dylib
+          - os: macos-15-intel
+            platform: macos
+            artifact: macos-x86_64
+            built: target/release/libotools_toonflow_native.dylib
+            output_name: macOS-x86_64.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # cargo test 的边车生命周期用例会拉起真实 Bun 桩服务端。
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native -> native/target
+          key: plugin-native-${{ matrix.artifact }}
+      - name: 构建 native 适配层
+        run: cargo build --release --manifest-path native/Cargo.toml
+      - name: 原生适配层单元测试
+        run: cargo test --release --manifest-path native/Cargo.toml
+      - name: 按宿主约定命名产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          built="native/${{ matrix.built }}"
+          test -f "$built" || { echo "未找到产物：$built"; ls -la native/target/release | head -40; exit 1; }
+          mkdir -p staging/lib
+          cp "$built" "staging/lib/${{ matrix.output_name }}"
+          ls -la staging/lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.artifact }}
+          path: staging/lib/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # 四份原生产物汇成一个 lib/：两份 macOS 用 lipo 合成 universal macOS.dylib。
+  # 与宿主 plugin-pack.yml 同法；必须在 macOS 上跑（lipo 是 macOS 工具）。
+  merge-native:
+    needs: build-native
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: lib
+      - name: 合成 universal macOS.dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm=lib/macOS-arm64.dylib
+          intel=lib/macOS-x86_64.dylib
+          test -f "$arm"   || { echo "缺少 arm64 产物"; ls -la lib; exit 1; }
+          test -f "$intel" || { echo "缺少 x86_64 产物"; ls -la lib; exit 1; }
+          test -f lib/Linux.so    || { echo "缺少 Linux 产物"; ls -la lib; exit 1; }
+          test -f lib/Windows.dll || { echo "缺少 Windows 产物"; ls -la lib; exit 1; }
+          lipo -create "$arm" "$intel" -output lib/macOS.dylib
+          codesign --force --sign - --timestamp=none lib/macOS.dylib
+          rm -f "$arm" "$intel"
+          echo "=== lipo -info ==="
+          lipo -info lib/macOS.dylib
+          ls -la lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-lib
+          path: lib/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # 下载各平台 Bun 运行时进 runtime/，让一份 .oplg 覆盖所有平台。
+  bundle-bun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 下载 Bun 运行时（多平台）
+        run: node scripts/bundle-bun.mjs --version 1.3.14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-bun
+          path: runtime/bun-*
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: [merge-native, bundle-bun]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      packid: ${{ steps.meta.outputs.packid }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      publish_enabled: ${{ steps.meta.outputs.publish_enabled }}
+      market_requested: ${{ steps.meta.outputs.market_requested }}
+      market_enabled: ${{ steps.meta.outputs.market_enabled }}
+      validate_release: ${{ steps.meta.outputs.validate_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # 上游 Toonflow 是 Bun monorepo，构建服务端需要 bun。
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: 校验版本、标签和发布开关
+        id: meta
+        env:
+          DISPLAY_VERSION: ${{ inputs.display_version }}
+          RELEASE_SOURCE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PUBLISH_MARKET: ${{ inputs.publish_market }}
+          AUTO_PUBLISH_MARKET: ${{ vars.OTOOLS_PUBLISH_MARKET || 'false' }}
+        run: node scripts/publish-market.mjs meta
+      - name: 发布脚本回归测试
+        run: node --test scripts/*.test.mjs
+      - name: 拉取并构建上游自包含服务端（build/）
+        run: node scripts/fetch-upstream.mjs
+      - name: 构建前端启动页（dist/）
+        run: |
+          npm ci
+          npm run build
+      # 原生产物（universal macOS.dylib + Windows.dll + Linux.so）。
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-lib
+          path: lib
+      # 多平台 Bun 运行时，与仓库自带的 runtime/launch.mjs 合并。
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-bun
+          path: runtime
+      - name: 打包正式插件并生成摘要
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: node scripts/pack-plugin.mjs --out dist-pack --version "$VERSION"
+      - name: 独立验证插件包
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          PACKID: ${{ steps.meta.outputs.packid }}
+        run: node scripts/verify-plugin.mjs dist-pack
+      # 防止「native/bun/上游 job 绿了但产物没进包」这类静默失败。
+      - name: 断言包内关键产物齐备
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg=$(ls dist-pack/*.oplg | head -1)
+          test -n "$pkg" || { echo "没有 .oplg"; exit 1; }
+          unzip -l "$pkg" | grep -E 'build/server/index\.js'
+          unzip -l "$pkg" | grep -E 'runtime/launch\.mjs'
+          unzip -l "$pkg" | grep -E 'runtime/bun-'
+          unzip -l "$pkg" | grep -E 'lib/(Linux\.so|Windows\.dll|macOS\.dylib)'
+          echo "✓ 上游服务端 + Bun 运行时 + 三平台 native 都在包内"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oplg
+          path: |
+            dist-pack/*.oplg
+            dist-pack/plugin.json
+            dist-pack/logo.svg
+            dist-pack/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+      - name: 构建摘要
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          PACKID: ${{ steps.meta.outputs.packid }}
+          PUBLISH_ENABLED: ${{ steps.meta.outputs.publish_enabled }}
+        run: |
+          printf '### 插件构建完成\n- 插件：`%s`\n- 版本：`%s`\n- 允许正式发布：`%s`\n\n' "$PACKID" "$VERSION" "$PUBLISH_ENABLED" >> "$GITHUB_STEP_SUMMARY"
+          cat dist-pack/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: build
+    if: ${{ needs.build.outputs.validate_release == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          name: oplg
+          path: release-assets
+      - name: 发布前重新验证产物
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          PACKID: ${{ needs.build.outputs.packid }}
+        run: node scripts/verify-plugin.mjs release-assets
+      - name: 检查市场凭证配置（不发送凭证、不上架）
+        if: ${{ needs.build.outputs.market_requested == 'true' }}
+        env:
+          AUTH_MODE: ${{ inputs.auth_mode || vars.XYCLOUD_AUTH_MODE || 'pat' }}
+          XYCLOUD_PAT: ${{ secrets.XYCLOUD_PAT }}
+          XYCLOUD_LOGIN_TOKEN: ${{ secrets.XYCLOUD_LOGIN_TOKEN }}
+          OTOOLS_MARKET_TOKEN: ${{ secrets.OTOOLS_MARKET_TOKEN }}
+          XYCLOUD_OIDC_ISSUER: ${{ vars.XYCLOUD_OIDC_ISSUER }}
+          XYCLOUD_PUBLISHER_ID: ${{ vars.XYCLOUD_PUBLISHER_ID }}
+          OTOOLS_MARKET_API: ${{ vars.OTOOLS_MARKET_API || 'https://otools-api.lingyun.net/api/v1/otools/plugin/publish' }}
+        run: node scripts/publish-market.mjs preflight
+      - name: 核验发布标签与构建提交
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: node scripts/release-policy.mjs
+      - name: 发布 GitHub Release
+        if: ${{ needs.build.outputs.publish_enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --target "$COMMIT_SHA" --title "$RELEASE_TAG" --notes "otools-toonflow v${RELEASE_VERSION}"
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/*.oplg release-assets/logo.svg release-assets/plugin.json release-assets/SHA256SUMS --clobber
+      # OIDC 获取和使用在同一进程完成，秘密不经过 job outputs 或 artifact。
+      - name: 授权并提交市场
+        if: ${{ needs.build.outputs.market_enabled == 'true' }}
+        env:
+          AUTH_MODE: ${{ inputs.auth_mode || vars.XYCLOUD_AUTH_MODE || 'pat' }}
+          XYCLOUD_PAT: ${{ secrets.XYCLOUD_PAT }}
+          XYCLOUD_LOGIN_TOKEN: ${{ secrets.XYCLOUD_LOGIN_TOKEN }}
+          OTOOLS_MARKET_TOKEN: ${{ secrets.OTOOLS_MARKET_TOKEN }}
+          XYCLOUD_OIDC_ISSUER: ${{ vars.XYCLOUD_OIDC_ISSUER }}
+          XYCLOUD_OIDC_AUDIENCE: ${{ vars.XYCLOUD_OIDC_AUDIENCE || 'otools-ci' }}
+          XYCLOUD_PUBLISHER_ID: ${{ vars.XYCLOUD_PUBLISHER_ID }}
+          OTOOLS_MARKET_API: ${{ vars.OTOOLS_MARKET_API || 'https://otools-api.lingyun.net/api/v1/otools/plugin/publish' }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          PLUGIN_MANIFEST: release-assets/plugin.json
+        run: node scripts/publish-market.mjs
+      - name: 发布摘要
+        env:
+          PUBLISH_ENABLED: ${{ needs.build.outputs.publish_enabled }}
+          MARKET_ENABLED: ${{ needs.build.outputs.market_enabled }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          printf '### 发布检查完成\n- 正式发布：`%s`\n- 市场提交：`%s`\n- 标签：`%s`\n' "$PUBLISH_ENABLED" "$MARKET_ENABLED" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

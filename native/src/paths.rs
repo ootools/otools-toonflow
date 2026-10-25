@@ -56,8 +56,36 @@ pub fn launcher_entry() -> PathBuf {
     runtime_dir().join("launch.mjs")
 }
 
+/// 打包进插件的 Bun 运行时二进制：按 OS/arch 选平台专属文件。
+///
+/// CI（`scripts/prepare-runtime.mjs` / release 工作流）把各平台的 Bun 放进
+/// `runtime/`，命名与 Bun 官方发布一致，让**一份 .oplg 覆盖所有平台**：
+///   runtime/bun-darwin-aarch64      runtime/bun-darwin-x86_64
+///   runtime/bun-linux-x86_64        runtime/bun-linux-aarch64
+///   runtime/bun-windows-x86_64.exe
+///
+/// 本地开发只在 `runtime/` 放一个当前平台的 `bun`（或 Windows 的 `bun.exe`），
+/// 取不到平台专属名字时回退到它；都没有则报缺运行时。
 pub fn bun_path() -> PathBuf {
-    runtime_dir().join(if cfg!(windows) { "bun.exe" } else { "bun" })
+    let dir = runtime_dir();
+    if let Some(name) = platform_bun_name() {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    dir.join(if cfg!(windows) { "bun.exe" } else { "bun" })
+}
+
+fn platform_bun_name() -> Option<&'static str> {
+    match (env::consts::OS, env::consts::ARCH) {
+        ("macos", "aarch64") => Some("bun-darwin-aarch64"),
+        ("macos", "x86_64") => Some("bun-darwin-x86_64"),
+        ("linux", "x86_64") => Some("bun-linux-x86_64"),
+        ("linux", "aarch64") => Some("bun-linux-aarch64"),
+        ("windows", _) => Some("bun-windows-x86_64.exe"),
+        _ => None,
+    }
 }
 
 /// 数据目录：插件目录会随升级被替换，工作区不能放那儿。
